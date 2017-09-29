@@ -2,11 +2,15 @@
 
 This document is based off of the [Editor's draft of WebVR](https://w3c.github.io/webvr/spec/latest/), modified to support both VR and AR.
 
+There is a [webxr-polyfill repo](https://github.com/mozilla/webxr-polyfill) with [example code](https://github.com/mozilla/webxr-polyfill/tree/master/examples) and a [primer on using the APIs](https://github.com/mozilla/webxr-polyfill/blob/master/CODING.md).
+
+For easy comparison, we maintain a [list of changes from WebVR 2.0 to WebXR](https://github.com/mozilla/webxr-api/blob/master/design%20docs/From%20WebVR%202.0%20to%20WebXR%202.1.md).
+
 The major concepts are:
 
 *XRDisplay*: a particular device and method for rendering XR layers (e.g. Daydream, Vive, Rift, Hololens, GearVR, Cardboard, or magic window)
 
-*Reality*: the rearmost information shown in a display (e.g. the real world in a passthrough display, a virtual reality in a HMD, a camera view in a magic window)
+*Reality*: the rearmost information shown in a display (e.g. the real world in a passthrough display, a virtual reality in a HMD, a camera view in a magic window) It is the view of the world presented to the user that will be augmented.
 
 *XRSession*: an interface to a display for rendering onto layers and requesting changes to the current Reality
 
@@ -37,8 +41,8 @@ _"VR" in names have been changed to "XR" to indicate that they are used for both
 		readonly attribute DOMString displayName;
 		readonly attribute boolean isExternal;
 
-		Promise<boolean> supportsSession(XRSessionCreateParametersInit parameters);
-		Promise<XRSession> requestSession(XRSessionCreateParametersInit parameters);
+		Promise<boolean> supportsSession(XRSessionCreateOptions parameters);
+		Promise<XRSession> requestSession(XRSessionCreateOptions parameters);
 
 		attribute EventHandler ondeactivate;
 	};
@@ -63,18 +67,17 @@ A Hololens could expose a single passthrough display.
 
 	interface XRSession : EventTarget {
 		readonly attribute XRDisplay display;
-		readonly attribute XRSessionCreateParameters createParameters;
+
+		readonly attribute boolean exclusive;
+		readonly attribute XRPresentationContext outputContext;
+		readonly attribute XRSessionType type;
 
 		readonly attribute <sequence <Reality>> realities; // All realities available to this session
-		readonly attribute Reality reality; // Defaults to most recently used Reality
+		readonly attribute Reality reality; // For augmentation sessions, this defaults to most recently used Reality. For reality sessions, this defaults to a new virtual Reality.
 
 		attribute XRLayer baseLayer;
 		attribute double depthNear;
 		attribute double depthFar;
-
-
-		Reality createVirtualReality(DOMString name, boolean shared=false);
-		Promise<void> requestRealityChange(Reality reality);
 
 		long requestFrame(XRFrameRequestCallback callback);
 		void cancelFrame(long handle);
@@ -96,21 +99,21 @@ A Hololens could expose a single passthrough display.
 
 A script that wishes to make use of an XRDisplay can request an XRSession. This session provides a list of the available realities that the script may request as well as make a request for an animation frame.
 
-_The XRSession plays the same basic role as the VRSession, with the addition of Reality management._
+_The XRSession plays the same basic role as the VRSession, with the addition of reality and augmentation management. The initialization parameters indicate whether the session is for managing a Reality (e.g. a virtual reality) or for augmenting an existing Reality._
 
 	enum XRSessionType { "reality", "augmentation" };
 
-	dictionary XRSessionCreateParametersInit {
-		required boolean exclusive = true;
-		optional XRSessionType type = "reality";
+	dictionary XRSessionCreateOptions {
+		boolean exclusive;
+		XRPresentationContext outputContext;
+		XRSessionType type;
 	};
 
-	interface XRSessionCreateParameters {
-		readonly attribute boolean exclusive;
-		readonly attribute XRSessionType type;
+	[SecureContext, Exposed=Window] interface XRPresentationContext {
+		readonly attribute HTMLCanvasElement canvas;
 	};
 
-- 'exclusive' needs to be rethought given the new use of XRDisplay for magic window. Do we still need sessions that just wants sensor data? 
+- 'exclusive' needs to be rethought given the new use of XRDisplay for magic window. Do we still need sessions that just want sensor data? 
 
 ## Reality
 
@@ -149,10 +152,10 @@ Realities can be shared among XRSessions, with multiple scripts rendering into t
 
 	interface XRAnchor {
 		readonly attribute DOMString uid;
-		readonly attribute XRCoordinates coordinates;
+		attribute XRCoordinates coordinates;
 	}
 
-XRAnchors provide per-frame coordinates which the Reality attempts to pin "in place". In a virtual Reality these coordinates do not change. In a Reality based on environment mapping sensors, the anchors may change coordinates on a per-frame bases as the system refines its map.
+XRAnchors provide per-frame coordinates which the Reality attempts to pin "in place". In a virtual Reality these coordinates probably do not change. In a Reality based on environment mapping sensors, the anchors may change coordinates on a per-frame bases as the system refines its map.
 
 ## XRPlaneAnchor
 
@@ -166,15 +169,13 @@ XRPlaneAnchors usually represent surfaces like floors, table tops, or walls.
 ## XRAnchorOffset 
 
 	interface XRAnchorOffset {
-		readonly attribute XRAnchor anchor;
-		readonly attribute double x;
-		readonly attribute double y;
-		readonly attribute double z;
+		readonly attribute DOMString anchorUID; // an XRAnchor.uid value
+		attribute Float32Array poseMatrix;		// the offset's transform relative to the XRAnchor.coordinates
+
+		XRCoordinates? getTransformedCoordinates(XRAnchor anchor) // coordinates of this offset in the XRCoordinateSystem of the anchor parameter
 	}
 
-XRAnchorOffset represents a position in relation to an anchor, returned when XRPresentationFrame.findAnchor casts a ray. If the ray intersects an XRPlaneAnchor, the XRAnchorOffset returned will contain that anchor and the position in the anchor's coordinate system where the intersection occurred. If the ray passes near an existing XRAnchor, the XRAnchorOffset returned may contain that anchor and the relative position of closest point on the ray. The Reality may, if possible, create a new XRAnchor for use in the XRAnchorOffset or return null if the ray does not intersect anything in the reality or it is not possible to anchor at the intersection.
-
-- How near is "near" for rays passing XRAnchors? ARKit suggests to stay no more than 3M from anchors or suffer lever arm issues.
+XRAnchorOffset represents a position in relation to an anchor, returned from XRPresentationFrame.findAnchor. If the hit test intersects an XRPlaneAnchor, the XRAnchorOffset returned will contain that anchor and the position in the anchor's coordinate system where the intersection occurred. The Reality may, if possible, create a new XRAnchor for use in the XRAnchorOffset or return null if the ray does not intersect anything in the reality or it is not possible to anchor at the intersection.
 
 ## XRManifold
 
@@ -201,6 +202,7 @@ XRAnchorOffset represents a position in relation to an anchor, returned when XRP
 ## XRPresentationFrame
 
 	interface XRPresentationFrame {
+		readonly attribute XRSession session;
 		readonly attribute FrozenArray<XRView> views;
 
 		readonly attribute boolean hasPointCloud;
@@ -216,7 +218,7 @@ XRAnchorOffset represents a position in relation to an anchor, returned when XRP
 		DOMString addAnchor(XRAnchor anchor);
 		void removeAnchor(DOMString uid);
 		XRAnchor? getAnchor(DOMString uid);
-		XRAnchorOffset? findAnchor(XRCoordinates); // cast a ray to find or create an anchor at the first intersection in the Reality
+		Promise<XRAnchorOffset?> findAnchor(float32 normalizedScreenX, float32 normalizedScreenY); // cast a ray to find or create an anchor at the first intersection in the Reality. Screen coordinates are 0,0 at top left and 1,1 at bottom right.
 
 		XRCoordinateSystem? getCoordinateSystem(...XRFrameOfReferenceType types); // Tries the types in order, returning the first match or null if none is found
 
@@ -225,14 +227,15 @@ XRAnchorOffset represents a position in relation to an anchor, returned when XRP
 
 _The XRPresentationFrame differs from the VRPresentationFrame with the addition of the point cloud, manifold, light estimates, and anchor management._
 
+- How can we offer up a more generic ray based equivalent to the screen oriented findAnchor?
 - Should we fire an event when a marker or feature based anchor (e.g. a wall, a table top) is detected?
 - How can we access camera image buffers aor textures?
 
 ## XRView
 
 	interface XRView {
-		readonly attribute XREye eye;
-		readonly attribute Float32Array projectionMatrix;
+		readonly attribute XREye? eye; // 'left', 'right', null
+		attribute Float32Array projectionMatrix;
 
 		XRViewport? getViewport(XRLayer layer);
 	};
@@ -240,10 +243,10 @@ _The XRPresentationFrame differs from the VRPresentationFrame with the addition 
 ## XRViewport
 
 	interface XRViewport {
-		readonly attribute long x;
-		readonly attribute long y;
-		readonly attribute long width;
-		readonly attribute long height;
+		attribute long x;
+		attribute long y;
+		attribute long width;
+		attribute long height;
 	};
 
 
@@ -281,7 +284,7 @@ The XRCartographicCoordinates are used in conjunction with the XRCoordinateSyste
 
 	interface XRCoordinates {
 		readonly attribute XRCoordinateSystem coordinateSystem;
-		readonly attribute Float32Array poseMatrix;
+		attribute Float32Array poseMatrix;
 
 		XRCoordinates? getTransformedCoordinates(XRCoordinateSystem otherCoordinateSystem) 
 	};
